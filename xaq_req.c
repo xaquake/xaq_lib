@@ -31,6 +31,7 @@ BOOL XaqInit(void);
 void XaqClean(void);
 
 
+/*
 PXAQ_HTTP_RESP XaqHttpGet(const char *Host, const char *Path);
 PXAQ_HTTP_RESP XaqHttpGetSec(const char *Host, const char *Path);
 PXAQ_HTTP_RESP XaqHttpPost(const char *Host, const char *Path, const char *Data, SIZE_T DataLength);
@@ -39,23 +40,27 @@ PXAQ_HTTP_RESP XaqHttpPostJson(const char *Host, const char *Path, const char *J
 PXAQ_HTTP_RESP XaqHttpPostJsonSec(const char *Host, const char *Path, const char *Json, SIZE_T DataLength);
 PXAQ_HTTP_RESP XaqHttpPutSec(const char *Host, const char *Path, const char *Data, SIZE_T DataLength);
 PXAQ_HTTP_RESP XaqHttpDeleteSec(const char *Host, const char *Path);
+*/
 
-PXAQ_HTTP_RESP XaqHttpGen(const char *Method, const char *Host, WORD Port, const char *Path, const char *Data, SIZE_T DataLength, const PXAQ_REQ_HEAD Headers, DWORD Flags);
+PXAQ_HTTP_RESP XaqHttpGen(const char *Method, const char *Host, WORD Port, const char *Path, const char *Data, \
+	SIZE_T DataLength, const PXAQ_REQ_HEAD Headers, DWORD Flags);
 void XaqHttpDestroy(PXAQ_HTTP_RESP Response);
+DWORD XaqGetLastErr(void);
+static BOOL EnsInit(void);
 
 
 #ifdef __cplusplus
 }
 #endif
 
-
 #ifdef XAQ_REQ_IMP
 
 
 static CRITICAL_SECTION g_InitCs;
-static volatile LONG g_InitCsReady = 0;
+static volatile LONG g_InitCsReadyR = 0;
 static volatile LONG g_InitDone = 0;
 static volatile LONG g_WininetLoaded = 0;
+static DWORD g_LastErr = 0;
 
 
 typedef HANDLE (__stdcall *GetProcessHeap_t)(void);
@@ -101,7 +106,17 @@ static HINTERNET g_Session = NULL;
 #define HTTP_SC 19
 #define HTTP_CT 1
 
+#define INTERNET_OPTION_CONNECT_TIMEOUT 2
+#define INTERNET_OPTION_SEND_TIMEOUT 5
+#define INTERNET_OPTION_RECEIVE_TIMEOUT 6
+
+#define INT_MAX 2147483647
 #define HEAP_ZERO_MEM 0x00000008
+
+DWORD XaqGetLastErr(void)
+{
+	return g_LastErr;
+}
 
 static BOOL PerfActInit(void)
 {
@@ -114,6 +129,7 @@ static BOOL PerfActInit(void)
         pHeapAlloc = (HeapAlloc_t)GetProcAddress(g_Kernel32, "HeapAlloc");
         pHeapReAlloc = (HeapReAlloc_t)GetProcAddress(g_Kernel32, "HeapReAlloc");
         pHeapFree = (HeapFree_t)GetProcAddress(g_Kernel32, "HeapFree");
+		g_Heap = pGetProcessHeap ? pGetProcessHeap() : GetProcessHeap();
     }
 
     g_Wininet = LoadLibraryA("wininet.dll");
@@ -137,20 +153,30 @@ static BOOL PerfActInit(void)
         return FALSE;
     }
 	
-	g_Session = pInternetOpenA("xaquake/1.0", 0, NULL, NULL, 0);
+	g_Session = pInternetOpenA("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.7.6165.123 Safari/537.36", 0, NULL, NULL, 0);
 	if (!g_Session) return FALSE;
 
     return TRUE;
+}
+
+static BOOL EnsInit(void)
+{
+	if (g_Heap != NULL) return TRUE;
+
+	if (!XaqInit()) return FALSE;
+
+	return g_Heap != NULL;
 }
 
 static BOOL XaqReqInit(void)
 {
     if (g_InitDone) return TRUE;
 
-    if (InterlockedCompareExchange(&g_InitCsReady, 1, 0) == 0) {
+    if (InterlockedCompareExchange(&g_InitCsReadyR, 1, 0) == 0) {
         InitializeCriticalSection(&g_InitCs);
+		MemoryBarrier();
     } else {
-        while (!g_InitCsReady) {
+        while (!g_InitCsReadyR) {
             Sleep(0);
         }
     }
@@ -195,10 +221,10 @@ void XaqClean(void)
 	InterlockedExchange(&g_WininetLoaded, 0);
 	InterlockedExchange(&g_InitDone, 0);
 	
-	if (g_InitCsReady)
+	if (g_InitCsReadyR)
 	{
 		DeleteCriticalSection(&g_InitCs);
-		InterlockedExchange(&g_InitCsReady, 0);
+		InterlockedExchange(&g_InitCsReadyR, 0);
 	}
 	
 	g_Kernel32 = NULL;
@@ -211,26 +237,26 @@ void XaqClean(void)
 
 static void* XaqAlloc(SIZE_T Size)
 {
-	if (!g_Heap) g_Heap = pGetProcessHeap ? pGetProcessHeap() : GetProcessHeap();
+	if (!EnsInit()) return NULL;
 	return pHeapAlloc ? pHeapAlloc(g_Heap, 0, Size) : HeapAlloc(g_Heap, 0, Size);
 }
 
 static void* XaqAllocZero(SIZE_T Size)
 {
-	if (!g_Heap) g_Heap = pGetProcessHeap ? pGetProcessHeap() : GetProcessHeap();
+	if (!EnsInit()) return NULL;
 	return pHeapAlloc ? pHeapAlloc(g_Heap, HEAP_ZERO_MEM, Size) : HeapAlloc(g_Heap, HEAP_ZERO_MEM, Size);
 }
 
 static void* XaqRealloc(void* Ptr, SIZE_T Size)
 {
-    if (!g_Heap) g_Heap = pGetProcessHeap ? pGetProcessHeap() : GetProcessHeap();
+    if (!EnsInit()) return NULL;
     return pHeapReAlloc ? pHeapReAlloc(g_Heap, 0, Ptr, Size) : HeapReAlloc(g_Heap, 0, Ptr, Size);
 }
 
 static void XaqFree(void* Ptr)
 {
 	if (!Ptr) return;
-	if (!g_Heap) g_Heap = pGetProcessHeap ? pGetProcessHeap() : GetProcessHeap();
+	if (!EnsInit()) return;
 	if (pHeapFree) pHeapFree(g_Heap, 0, Ptr);
 	else HeapFree(g_Heap, 0, Ptr);
 }
@@ -270,13 +296,17 @@ static char* XaqDupStr(const char* Str)
 	return Result;
 }
 
-static int XaqStrToInt(const char* Str)
+static int XaqStrToInt(const char* Str, int* Out)
 {
 	int Result = 0;
-	
-	while (*Str >= '0' && *Str <= '9') Result = Result * 10 + (*Str++ - '0');
-	
-	return Result;
+	int Digits = 0;
+	while (*Str >= '0' && *Str <= '9')
+	{
+		Result = Result * 10 + (*Str++ - '0');
+		Digits ++;
+	}
+	if (Out) *Out = Result;
+	return Digits > 0;
 }
 
 
@@ -321,6 +351,7 @@ BOOL XaqHttpHeadersAdd(PXAQ_REQ_HEAD Headers, const char *Name, const char *Valu
 	
 	if (Headers->Count >= Headers->Capacity)
 	{
+		if (Headers->Capacity > INT_MAX / 2) return FALSE;
 		int NewCapacity = Headers->Capacity * 2;
 		char **NewNames = (char **)XaqRealloc(Headers->Names, NewCapacity * sizeof(char *));
 		char **NewValues = (char **)XaqRealloc(Headers->Values, NewCapacity * sizeof(char *));
@@ -383,29 +414,54 @@ void XaqHttpDestroy(PXAQ_HTTP_RESP Response)
 }
 
 
-PXAQ_HTTP_RESP XaqHttpGen(const char *Method, const char *Host, WORD Port, const char *Path, const char *Data, SIZE_T DataLength, const PXAQ_REQ_HEAD Headers, DWORD Flags)
+PXAQ_HTTP_RESP XaqHttpGen(const char *Method, const char *Host, WORD Port, const char *Path, const char *Data, 
+	SIZE_T DataLength, const PXAQ_REQ_HEAD Headers, DWORD Flags)
 {
 	if (!g_Session)
 	{
-		if (!XaqInit()) return NULL;
+		if (!XaqInit()) 
+		{
+			g_LastErr = GetLastError();
+			return NULL;
+		}
 		if (!g_Session)
 		{
-			g_Session = pInternetOpenA("xaquake/1.0", 0, NULL, NULL, 0);
-			if (!g_Session) return NULL;
+			g_Session = pInternetOpenA("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.7.6165.123 Safari/537.36", 0, NULL, NULL, 0);
+			if (!g_Session) 
+			{
+				g_LastErr = GetLastError();
+				return NULL;
+			}
 		}
 	}
 	
-	if (!Method || !Host || !Path) return NULL;
+	if (!Method || !Host || !Path)
+	{
+		g_LastErr = GetLastError();
+		return NULL;
+	}
 	
 	HINTERNET hConn = pInternetConnectA(g_Session, Host, Port, NULL, NULL, 3, 0, 0);
 	
-	if (!hConn) return NULL;
+	if (!hConn)
+	{
+		g_LastErr = GetLastError();
+		return NULL;
+	}
 	
 	HINTERNET hReq = pHttpOpenRequestA(hConn, Method, Path, NULL, NULL, NULL, Flags, 0);
+	
+	DWORD Timeout = 10000;
+	pInternetSetOptionA(hReq, INTERNET_OPTION_CONNECT_TIMEOUT, &Timeout, sizeof(Timeout));
+	Timeout = 10000;
+	pInternetSetOptionA(hReq, INTERNET_OPTION_SEND_TIMEOUT, &Timeout, sizeof(Timeout));
+	Timeout = 10000;
+	pInternetSetOptionA(hReq, INTERNET_OPTION_RECEIVE_TIMEOUT, &Timeout, sizeof(Timeout));
 	
 	if (!hReq)
 	{
 		pInternetCloseHandle(hConn);
+		g_LastErr = GetLastError();
 		return NULL;
 	}
 	
@@ -419,6 +475,7 @@ PXAQ_HTTP_RESP XaqHttpGen(const char *Method, const char *Host, WORD Port, const
 	{
 		pInternetCloseHandle(hReq);
 		pInternetCloseHandle(hConn);
+		g_LastErr = GetLastError();
 		return NULL;
 	}
 	
@@ -428,6 +485,7 @@ PXAQ_HTTP_RESP XaqHttpGen(const char *Method, const char *Host, WORD Port, const
 	{
 		pInternetCloseHandle(hReq);
 		pInternetCloseHandle(hConn);
+		g_LastErr = GetLastError();
 		return NULL;
 	}
 	
@@ -435,13 +493,42 @@ PXAQ_HTTP_RESP XaqHttpGen(const char *Method, const char *Host, WORD Port, const
 	DWORD BufLen = sizeof(Buf_sc);
 	DWORD Index = 0;
 	
-	if (pHttpQueryInfoA(hReq, HTTP_SC, Buf_sc, &BufLen, &Index)) Resp->StatusCode = XaqStrToInt(Buf_sc);
+	if (pHttpQueryInfoA(hReq, HTTP_SC, Buf_sc, &BufLen, &Index))
+	{
+		int SCode;
+		if (XaqStrToInt(Buf_sc, &SCode))
+		{
+			Resp->StatusCode = SCode;
+		}
+		else
+		{
+			Resp->StatusCode = -1;
+		}
+	}
+	else
+	{
+		Resp->StatusCode = 0;
+	}
 	
-	char Buf_ct[256];
-	DWORD Ct_Len = sizeof(Buf_ct);
+	DWORD Ct_Len = 0;
 	Index = 0;
 	
-	if (pHttpQueryInfoA(hReq, HTTP_CT, Buf_ct, &Ct_Len, &Index)) Resp->ContentType = XaqDupStr(Buf_ct);
+	if (!pHttpQueryInfoA(hReq, HTTP_CT, NULL, &Ct_Len, &Index) && GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+	{
+		char *Buf_ct = (char*)XaqAlloc(Ct_Len + 1);
+		if (Buf_ct)
+		{
+			if (pHttpQueryInfoA(hReq, HTTP_CT, Buf_ct, &Ct_Len, &Index))
+			{
+				Buf_ct[Ct_Len] = '\0';
+				Resp->ContentType = Buf_ct;
+			}
+			else
+			{
+				XaqFree(Buf_ct);
+			}
+		}
+	}
 	
 	SIZE_T Capacity = 4096;
 	Resp->Body = (char*)XaqAlloc(Capacity);
@@ -451,6 +538,7 @@ PXAQ_HTTP_RESP XaqHttpGen(const char *Method, const char *Host, WORD Port, const
 		XaqHttpDestroy(Resp);
 		pInternetCloseHandle(hReq);
 		pInternetCloseHandle(hConn);
+		g_LastErr = GetLastError();
 		return NULL;
 	}
 	
@@ -478,6 +566,7 @@ PXAQ_HTTP_RESP XaqHttpGen(const char *Method, const char *Host, WORD Port, const
 	return Resp;
 }
 
+/*
 PXAQ_HTTP_RESP XaqHttpGet(const char *Host, const char *Path)
 {
 	return XaqHttpGen("GET", Host, 80, Path, NULL, 0, NULL, 0);
@@ -533,6 +622,7 @@ PXAQ_HTTP_RESP XaqHttpDeleteSec(const char *Host, const char *Path)
 {
 	return XaqHttpGen("DELETE", Host, 443, Path, NULL, 0, NULL, FG_SEC);
 }
+*/
 
 #endif /* XAQ_REQ_IMP */
 
